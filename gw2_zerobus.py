@@ -1,0 +1,290 @@
+"""GW2 → Databricks ZeroBus streaming bridge.
+
+Reads the MumbleLink shared memory at a configurable rate, flattens each
+sample to a JSON row matching the Unity Catalog table in create_table.sql,
+and ingests it via the official Databricks ZeroBus Python SDK.
+
+Run:
+    python gw2_zerobus.py
+Stop with Ctrl+C; the stream is closed cleanly so in-flight records are
+acknowledged before exit.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import signal
+import sys
+import time
+from datetime import datetime, timezone
+from typing import Optional
+
+from dotenv import load_dotenv
+
+import enrich
+from mumblelink import LinkedMem, MumbleLinkError, MumbleLinkReader
+
+LOG = logging.getLogger("gw2_zerobus")
+
+
+def flatten_sample(sample: LinkedMem) -> dict:
+    """Convert a parsed LinkedMem into a flat dict matching the UC table."""
+    identity = sample.identity or {}
+    ctx = sample.context
+
+    server_ip, server_port = enrich.parse_server_address(ctx.server_address)
+    ui_state_flags = enrich.decode_ui_state(ctx.ui_state)
+
+    record = {
+        "event_timestamp": datetime.now(timezone.utc).isoformat(),
+        "ui_version": sample.ui_version,
+        "ui_tick": sample.ui_tick,
+
+        "game_name": sample.name or None,
+        "description": sample.description or None,
+
+        "avatar_pos_x": sample.avatar_position[0],
+        "avatar_pos_y": sample.avatar_position[1],
+        "avatar_pos_z": sample.avatar_position[2],
+        "avatar_front_x": sample.avatar_front[0],
+        "avatar_front_y": sample.avatar_front[1],
+        "avatar_front_z": sample.avatar_front[2],
+        "avatar_top_x": sample.avatar_top[0],
+        "avatar_top_y": sample.avatar_top[1],
+        "avatar_top_z": sample.avatar_top[2],
+
+        "camera_pos_x": sample.camera_position[0],
+        "camera_pos_y": sample.camera_position[1],
+        "camera_pos_z": sample.camera_position[2],
+        "camera_front_x": sample.camera_front[0],
+        "camera_front_y": sample.camera_front[1],
+        "camera_front_z": sample.camera_front[2],
+        "camera_top_x": sample.camera_top[0],
+        "camera_top_y": sample.camera_top[1],
+        "camera_top_z": sample.camera_top[2],
+
+        "player_name": identity.get("name"),
+        "profession": identity.get("profession"),
+        "profession_name": enrich.profession_name(identity.get("profession")),
+        "spec": identity.get("spec"),
+        "race": identity.get("race"),
+        "race_name": enrich.race_name(identity.get("race")),
+        "identity_map_id": identity.get("map_id"),
+        "world_id": identity.get("world_id"),
+        "team_color_id": identity.get("team_color_id"),
+        "team_color_name": enrich.team_color_name(identity.get("team_color_id")),
+        "commander": identity.get("commander"),
+        "fov": identity.get("fov"),
+        "uisz": identity.get("uisz"),
+
+        "context_len": sample.context_len,
+        "server_address_raw": ctx.server_address.hex(),
+        "server_ip": server_ip,
+        "server_port": server_port,
+        "map_id": ctx.map_id,
+        "map_type": ctx.map_type,
+        "map_type_name": enrich.map_type_name(ctx.map_type),
+        "shard_id": ctx.shard_id,
+        "instance": ctx.instance,
+        "build_id": ctx.build_id,
+        "ui_state": ctx.ui_state,
+        **ui_state_flags,
+        "compass_width": ctx.compass_width,
+        "compass_height": ctx.compass_height,
+        "compass_rotation": ctx.compass_rotation,
+        "player_continent_x": ctx.player_x,
+        "player_continent_y": ctx.player_y,
+        "map_center_x": ctx.map_center_x,
+        "map_center_y": ctx.map_center_y,
+        "map_scale": ctx.map_scale,
+        "process_id": ctx.process_id,
+        "mount_index": ctx.mount_index,
+        "mount_name": enrich.mount_name(ctx.mount_index),
+    }
+    return record
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise SystemExit(
+            f"Missing required env var {name}. Copy .env.example to .env and fill it in."
+        )
+    return value
+
+
+class _ShutdownFlag:
+    def __init__(self) -> None:
+        self._stop = False
+
+    def trigger(self, *_args) -> None:
+        self._stop = True
+
+    def __bool__(self) -> bool:
+        return self._stop
+
+
+def run(
+    *,
+    poll_hz: float,
+    dedupe_by_tick: bool,
+    mumblelink_path: Optional[str],
+    workspace_url: str,
+    zerobus_endpoint: str,
+    client_id: str,
+    client_secret: str,
+    table: str,
+    dry_run: bool = False,
+) -> None:
+    # Imported lazily so --dry-run works without the SDK installed.
+    if not dry_run:
+        from zerobus.sdk.shared import RecordType, StreamConfigurationOptions, TableProperties
+        from zerobus.sdk.sync import ZerobusSdk
+
+    poll_interval = 1.0 / poll_hz if poll_hz > 0 else 0.0
+    shutdown = _ShutdownFlag()
+    signal.signal(signal.SIGINT, shutdown.trigger)
+    signal.signal(signal.SIGTERM, shutdown.trigger)
+
+    LOG.info(
+        "starting: table=%s endpoint=%s poll_hz=%.2f dedupe=%s dry_run=%s",
+        table, zerobus_endpoint, poll_hz, dedupe_by_tick, dry_run,
+    )
+
+    last_tick: Optional[int] = None
+    sent = 0
+    skipped_dupes = 0
+
+    with MumbleLinkReader(mumblelink_path) as reader:
+        stream = None
+        try:
+            if not dry_run:
+                sdk = ZerobusSdk(zerobus_endpoint, workspace_url)
+                table_properties = TableProperties(table)
+                options = StreamConfigurationOptions(record_type=RecordType.JSON)
+                stream = sdk.create_stream(
+                    client_id, client_secret, table_properties, options
+                )
+                LOG.info("ZeroBus stream open")
+
+            while not shutdown:
+                loop_start = time.monotonic()
+
+                try:
+                    sample = reader.read()
+                except MumbleLinkError as e:
+                    LOG.warning("read failed: %s", e)
+                    time.sleep(min(2.0, max(poll_interval, 0.5)))
+                    continue
+
+                # GW2 sets uiTick=0 until the player loads in. Skip empty frames.
+                if sample.ui_tick == 0:
+                    if poll_interval:
+                        time.sleep(poll_interval)
+                    continue
+
+                if dedupe_by_tick and sample.ui_tick == last_tick:
+                    skipped_dupes += 1
+                    if poll_interval:
+                        time.sleep(poll_interval)
+                    continue
+                last_tick = sample.ui_tick
+
+                record = flatten_sample(sample)
+
+                if dry_run:
+                    LOG.info("[dry-run] tick=%d player=%s pos=(%.2f, %.2f, %.2f)",
+                             sample.ui_tick,
+                             record.get("player_name"),
+                             record.get("avatar_pos_x") or 0,
+                             record.get("avatar_pos_y") or 0,
+                             record.get("avatar_pos_z") or 0)
+                else:
+                    stream.ingest_record_offset(record)
+                sent += 1
+                if sent % 100 == 0:
+                    LOG.info("sent=%d skipped_dupes=%d last_tick=%s",
+                             sent, skipped_dupes, last_tick)
+
+                elapsed = time.monotonic() - loop_start
+                remaining = poll_interval - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
+
+        finally:
+            if stream is not None:
+                LOG.info("flushing & closing ZeroBus stream (sent=%d)", sent)
+                try:
+                    stream.close()
+                except Exception as e:  # noqa: BLE001 - best-effort shutdown
+                    LOG.warning("stream.close() raised: %s", e)
+            LOG.info("done. sent=%d skipped_dupes=%d", sent, skipped_dupes)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Stream GW2 MumbleLink samples to a Databricks ZeroBus table.",
+    )
+    parser.add_argument("--poll-hz", type=float, default=None,
+                        help="Poll rate in Hz (default: $POLL_HZ or 10)")
+    parser.add_argument("--no-dedupe", action="store_true",
+                        help="Send every sample, even if uiTick has not advanced")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Read MumbleLink and log records; skip ZeroBus")
+    parser.add_argument("--mumblelink-path", default=None,
+                        help="Override shared-memory path (Linux) or tagname (Windows)")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Enable DEBUG logging")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    load_dotenv()
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    poll_hz = args.poll_hz
+    if poll_hz is None:
+        poll_hz = float(os.environ.get("POLL_HZ", "10"))
+
+    dedupe = not args.no_dedupe and (
+        os.environ.get("DEDUPE_BY_TICK", "true").lower() != "false"
+    )
+
+    mumblelink_path = args.mumblelink_path or os.environ.get("MUMBLELINK_PATH") or None
+
+    if args.dry_run:
+        run(
+            poll_hz=poll_hz,
+            dedupe_by_tick=dedupe,
+            mumblelink_path=mumblelink_path,
+            workspace_url="",
+            zerobus_endpoint="",
+            client_id="",
+            client_secret="",
+            table="",
+            dry_run=True,
+        )
+        return 0
+
+    run(
+        poll_hz=poll_hz,
+        dedupe_by_tick=dedupe,
+        mumblelink_path=mumblelink_path,
+        workspace_url=_require_env("DATABRICKS_WORKSPACE_URL"),
+        zerobus_endpoint=_require_env("ZEROBUS_ENDPOINT"),
+        client_id=_require_env("DATABRICKS_CLIENT_ID"),
+        client_secret=_require_env("DATABRICKS_CLIENT_SECRET"),
+        table=_require_env("ZEROBUS_TABLE"),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
