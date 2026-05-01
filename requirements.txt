@@ -1,2 +1,6 @@
 databricks-zerobus-ingest-sdk>=0.1.0
 python-dotenv>=1.0.0
+# For gw2_map_overlay.py only. tkinter is a system package, not a pip package
+# (apt-get install python3-tk on Debian/Ubuntu, brew install python-tk on
+# macOS; bundled with Python on Windows).
+Pillow>=10.0.0

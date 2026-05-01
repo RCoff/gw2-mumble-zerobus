@@ -21,10 +21,11 @@ mode but you cannot read a live game.
 
 | File              | What it is                                                 |
 |-------------------|------------------------------------------------------------|
-| `mumblelink.py`   | Reader + binary parser for the 5460-byte LinkedMem block   |
-| `enrich.py`       | Decoders for profession/race/mount/map_type/uiState/sockaddr |
-| `gw2_zerobus.py`  | CLI: poll → flatten → ingest                               |
-| `create_table.sql`| Unity Catalog DDL (every MumbleLink field + enrichment)    |
+| `mumblelink.py`     | Reader + binary parser for the 5460-byte LinkedMem block   |
+| `enrich.py`         | Decoders for profession/race/mount/map_type/uiState/sockaddr |
+| `gw2_zerobus.py`    | CLI: poll → flatten → ingest                               |
+| `gw2_map_overlay.py`| Tk window — draws the live player position on GW2 map tiles |
+| `create_table.sql`  | Unity Catalog DDL (every MumbleLink field + enrichment)    |
 | `requirements.txt`| Python deps                                                |
 | `.env.example`    | Config template — copy to `.env`                           |
 | `_smoketest.py`   | Offline parser/flatten/SQL parity check                    |
@@ -170,6 +171,66 @@ Pipe to `jq` for ad-hoc filtering — e.g. extract the position trail:
   | sed -n 's/.*\[dry-run\] \({.*\)/\1/p' \
   | jq -c '{ui_tick, x: .player_continent_x, y: .player_continent_y, map_id}'
 ```
+
+## Map overlay window
+
+`gw2_map_overlay.py` is a separate Tk app that reads MumbleLink (just like
+the streamer does) and renders the live player position on top of the
+official GW2 map tiles. Run it standalone, or in parallel with
+`gw2_zerobus.py` — both processes can read MumbleLink concurrently without
+conflict.
+
+```bash
+.venv/bin/python gw2_map_overlay.py
+```
+
+What it does:
+
+- Resolves the current `map_id` to `continent_id` + `default_floor` via
+  `https://api.guildwars2.com/v2/maps/{id}`.
+- Pulls map tiles from `https://tiles.guildwars2.com/{cont}/{floor}/{zoom}/{x}/{y}.jpg`.
+- Composites a viewport centered on the player and draws a marker at the
+  player's continent coordinates.
+- Caches everything to disk under `~/.cache/gw2_map_overlay/` (tiles
+  never change once published, so a cache hit is final).
+- Background thread does HTTP fetches; the UI thread never blocks waiting
+  for tiles, so a map change isn't a freeze.
+
+All sampled positions on the current map are drawn as a yellow trail
+behind the player marker. There's one trail kept per `map_id` (re-visiting
+a map preserves history; switching to a new map starts fresh). The trail
+is bounded — when full the oldest point drops off — and points closer than
+`--trail-step` continent-units to the previous one are skipped, so
+standing still doesn't fill the buffer.
+
+In-window keyboard shortcuts:
+
+| Key   | Effect                            |
+|-------|-----------------------------------|
+| `+`   | Zoom in                           |
+| `-`   | Zoom out                          |
+| `c`   | Clear the current map's trail     |
+| `q`   | Quit                              |
+
+CLI flags: `--zoom N` (initial zoom 0..max-for-continent),
+`--width W --height H`, `--poll-hz N`, `--mumblelink-path PATH`,
+`--cache-dir DIR`, `--trail-cap N` (max points per map; default 5000),
+`--trail-step UNITS` (min movement before a new point; default 5),
+`--no-trail`, `-v`.
+
+### Tk dependency
+
+Tkinter is a *system* package, not a pip package. Most Python installs
+include it, but Homebrew's macOS Python doesn't:
+
+| Platform                         | Install                            |
+|----------------------------------|------------------------------------|
+| Windows (python.org installer)   | included                           |
+| Linux (Debian/Ubuntu)            | `sudo apt-get install python3-tk`  |
+| macOS (Homebrew Python 3.14)     | `brew install python-tk@3.14`      |
+| macOS (python.org installer)     | included                           |
+
+Pillow is in `requirements.txt`; that one's a normal pip install.
 
 ## Verifying the parser without GW2
 
