@@ -23,6 +23,7 @@ mode but you cannot read a live game.
 |-------------------|------------------------------------------------------------|
 | `mumblelink.py`     | Reader + binary parser for the 5460-byte LinkedMem block   |
 | `enrich.py`         | Decoders for profession/race/mount/map_type/uiState/sockaddr |
+| `session.py`        | Synthesises a `character_session_id` from MumbleLink signals |
 | `gw2_zerobus.py`    | CLI: poll → flatten → ingest                               |
 | `gw2_map_overlay.py`| Tk window — draws the live player position on GW2 map tiles |
 | `create_table.sql`  | Unity Catalog DDL (every MumbleLink field + enrichment)    |
@@ -261,7 +262,7 @@ Each row written to `gw2_player_position` has these groups of columns
 
 | Group       | Columns                                                                 |
 |-------------|-------------------------------------------------------------------------|
-| Metadata    | `event_timestamp`, `ui_version`, `ui_tick`                              |
+| Metadata    | `event_timestamp`, `character_session_id`, `character_session_start_ts`, `ui_version`, `ui_tick` |
 | Game info   | `game_name`, `description`                                              |
 | Avatar      | `avatar_pos_{x,y,z}`, `avatar_front_{x,y,z}`, `avatar_top_{x,y,z}`      |
 | Camera      | `camera_pos_{x,y,z}`, `camera_front_{x,y,z}`, `camera_top_{x,y,z}`      |
@@ -275,6 +276,51 @@ Each row written to `gw2_player_position` has these groups of columns
 `player_continent_*` are in GW2 continent coordinates.
 
 ---
+
+## Synthetic character sessions
+
+MumbleLink doesn't expose "logged in" or "logged out" directly, but a few
+signals together let us synthesise a stable `character_session_id` that
+holds across map changes / mounts / combat but resets on a real session
+boundary. A new session ID is allocated when any of the following triggers
+fires:
+
+| Trigger              | What it represents                                         |
+|----------------------|------------------------------------------------------------|
+| `first_sample`       | First time the streamer sees an in-world frame             |
+| `logged_in`          | Player was at character-select (`uiTick==0`) and is now in-world again |
+| `character_changed`  | `identity.name` flipped to a different character           |
+| `process_changed`    | `process_id` changed — GW2 was closed and relaunched       |
+| `idle_gap`           | More than 60 s elapsed without an in-world sample (presumed disconnect) |
+
+Each record carries:
+
+- `character_session_id` — short hex token (12 chars, e.g. `a3f8e1c20b94`)
+- `character_session_start_ts` — when the session opened, ISO-8601 UTC
+
+The streamer logs at INFO when a new session opens, with the trigger reason:
+
+```
+INFO gw2_zerobus.session: new character session: id=a3f8e1c20b94 reason=character_changed name='Ridgeward' pid=4242
+```
+
+Useful follow-on queries against the UC table:
+
+```sql
+-- Per-session length and distance walked
+SELECT
+  character_session_id,
+  ANY_VALUE(player_name)              AS player,
+  MIN(event_timestamp)                AS started,
+  MAX(event_timestamp)                AS ended,
+  TIMESTAMPDIFF(SECOND, MIN(event_timestamp), MAX(event_timestamp)) AS session_seconds,
+  COUNT(DISTINCT map_id)              AS maps_visited,
+  COUNT(*)                            AS samples
+FROM <catalog>.<schema>.gw2_player_position
+WHERE event_timestamp > current_timestamp() - INTERVAL 7 DAYS
+GROUP BY character_session_id
+ORDER BY started DESC;
+```
 
 ## Notes & gotchas
 

@@ -16,15 +16,25 @@ if "dotenv" not in sys.modules:
 import enrich
 import gw2_zerobus
 import mumblelink as ml
+import session as session_mod
 
 
-def build_buffer() -> bytes:
+def build_buffer(
+    *,
+    name: str = "Ridgeward",
+    profession: int = 1,
+    race: int = 3,
+    map_id: int = 38,
+    ui_tick: int = 123456,
+    process_id: int = 4242,
+    mount_index: int = 5,
+) -> bytes:
     identity = json.dumps({
-        "name": "Ridgeward",
-        "profession": 1,
+        "name": name,
+        "profession": profession,
         "spec": 27,
-        "race": 3,
-        "map_id": 38,
+        "race": race,
+        "map_id": map_id,
         "world_id": 268435511,
         "team_color_id": 0,
         "commander": False,
@@ -41,19 +51,19 @@ def build_buffer() -> bytes:
     context = struct.pack(
         ml.MUMBLE_CONTEXT_FORMAT,
         server_addr,
-        38, 5, 12, 0, 180000, 0x09,
+        map_id, 5, 12, 0, 180000, 0x09,
         362, 362,
         0.0,
         25896.4, 19112.7, 25000.0, 19000.0, 1.0,
-        4242,
-        5,
+        process_id,
+        mount_index,
     )
     context_padded = context.ljust(256, b"\x00")[:256]
 
     return struct.pack(
         ml.LINKED_MEM_FORMAT,
         2,
-        123456,
+        ui_tick,
         100.5, 200.5, -50.25,
         0.0, 0.0, 1.0,
         0.0, 1.0, 0.0,
@@ -112,7 +122,10 @@ def main() -> None:
     assert ip == "97.105.110.111"
     assert port == 6112
 
-    record = gw2_zerobus.flatten_sample(parsed)
+    tracker = session_mod.SessionTracker()
+    info = tracker.update(parsed)
+    assert info is not None and info.session_id and info.reason == "first_sample"
+    record = gw2_zerobus.flatten_sample(parsed, session=info)
     expected = {
         "player_name": "Ridgeward",
         "profession_name": "Guardian",
@@ -123,6 +136,8 @@ def main() -> None:
         "server_port": 6112,
         "avatar_pos_x": 100.5,
         "ui_state_map_open": True,
+        "character_session_id": info.session_id,
+        "character_session_start_ts": info.session_start_iso,
     }
     for k, v in expected.items():
         assert record[k] == v, f"{k}: got {record[k]!r} want {v!r}"
@@ -139,8 +154,56 @@ def main() -> None:
     assert not extra_in_record, f"record has columns not in SQL: {extra_in_record}"
     assert not missing_in_record, f"SQL has columns not in record: {missing_in_record}"
 
-    print("OK: parser + enrichment + flatten + SQL column parity")
+    _test_session_tracker()
+
+    print("OK: parser + enrichment + flatten + SQL column parity + session")
     print(f"  record keys: {len(record)}")
+
+
+def _test_session_tracker() -> None:
+    """Exercise every session-boundary trigger SessionTracker is meant to detect."""
+    tracker = session_mod.SessionTracker(idle_gap_seconds=0.05)
+
+    # 1. First in-world sample → opens session.
+    s1 = ml.parse_linked_mem(build_buffer(name="A", process_id=1000))
+    info1 = tracker.update(s1)
+    assert info1 is not None and info1.reason == "first_sample"
+    sid1 = info1.session_id
+
+    # 2. Same sample again → same session.
+    info2 = tracker.update(s1)
+    assert info2.session_id == sid1 and info2.reason == "unchanged"
+
+    # 3. Character switch → new session.
+    s_other = ml.parse_linked_mem(build_buffer(name="B", process_id=1000))
+    info3 = tracker.update(s_other)
+    assert info3.reason == "character_changed"
+    assert info3.session_id != sid1
+    sid3 = info3.session_id
+
+    # 4. Process restart → new session.
+    s_restart = ml.parse_linked_mem(build_buffer(name="B", process_id=2000))
+    info4 = tracker.update(s_restart)
+    assert info4.reason == "process_changed"
+    assert info4.session_id != sid3
+    sid4 = info4.session_id
+
+    # 5. uiTick=0 (logout/loading) → returns None and arms a fresh session.
+    s_logout = ml.parse_linked_mem(build_buffer(name="B", process_id=2000, ui_tick=0))
+    assert tracker.update(s_logout) is None
+    s_back = ml.parse_linked_mem(build_buffer(name="B", process_id=2000))
+    info5 = tracker.update(s_back)
+    assert info5.reason == "logged_in"
+    assert info5.session_id != sid4
+    sid5 = info5.session_id
+
+    # 6. Idle gap (we configured 50ms) → new session.
+    import time as _time
+    _time.sleep(0.1)
+    s_after_gap = ml.parse_linked_mem(build_buffer(name="B", process_id=2000))
+    info6 = tracker.update(s_after_gap)
+    assert info6.reason == "idle_gap"
+    assert info6.session_id != sid5
 
 
 if __name__ == "__main__":

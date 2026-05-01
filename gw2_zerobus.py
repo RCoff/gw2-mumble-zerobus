@@ -26,12 +26,22 @@ from dotenv import load_dotenv
 
 import enrich
 from mumblelink import LinkedMem, MumbleLinkError, MumbleLinkReader
+from session import SessionInfo, SessionTracker
 
 LOG = logging.getLogger("gw2_zerobus")
 
 
-def flatten_sample(sample: LinkedMem) -> dict:
-    """Convert a parsed LinkedMem into a flat dict matching the UC table."""
+def flatten_sample(
+    sample: LinkedMem,
+    *,
+    session: Optional[SessionInfo] = None,
+) -> dict:
+    """Convert a parsed LinkedMem into a flat dict matching the UC table.
+
+    `session`, when provided, contributes the synthetic character-session
+    columns. It's optional so older callers / tests can still flatten
+    without instantiating a SessionTracker.
+    """
     identity = sample.identity or {}
     ctx = sample.context
 
@@ -40,6 +50,8 @@ def flatten_sample(sample: LinkedMem) -> dict:
 
     record = {
         "event_timestamp": datetime.now(timezone.utc).isoformat(),
+        "character_session_id": session.session_id if session else None,
+        "character_session_start_ts": session.session_start_iso if session else None,
         "ui_version": sample.ui_version,
         "ui_tick": sample.ui_tick,
 
@@ -122,8 +134,10 @@ def _record_summary(record: dict) -> str:
     py = record.get("avatar_pos_y")
     pz = record.get("avatar_pos_z")
     pos = f"({px:.2f}, {py:.2f}, {pz:.2f})" if None not in (px, py, pz) else "(?, ?, ?)"
+    sid = record.get("character_session_id") or "-"
     return (
         f"tick={record.get('ui_tick')} "
+        f"sid={sid} "
         f"player={record.get('player_name')!r} "
         f"prof={record.get('profession_name')} "
         f"map_id={record.get('map_id')} "
@@ -180,6 +194,7 @@ def run(
     last_tick: Optional[int] = None
     sent = 0
     skipped_dupes = 0
+    tracker = SessionTracker()
 
     with MumbleLinkReader(mumblelink_path) as reader:
         stream = None
@@ -203,8 +218,11 @@ def run(
                     time.sleep(min(2.0, max(poll_interval, 0.5)))
                     continue
 
-                # GW2 sets uiTick=0 until the player loads in. Skip empty frames.
-                if sample.ui_tick == 0:
+                # Always run the session tracker, even on uiTick=0, so it can
+                # observe the logout/login boundary; it returns None for those
+                # frames and we skip downstream work.
+                session = tracker.update(sample)
+                if session is None:
                     if poll_interval:
                         time.sleep(poll_interval)
                     continue
@@ -216,7 +234,7 @@ def run(
                     continue
                 last_tick = sample.ui_tick
 
-                record = flatten_sample(sample)
+                record = flatten_sample(sample, session=session)
 
                 if dry_run:
                     summary = _record_summary(record)

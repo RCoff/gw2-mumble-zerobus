@@ -7,9 +7,14 @@
 
 CREATE TABLE IF NOT EXISTS <catalog>.<schema>.gw2_player_position (
   -- Sample metadata
-  event_timestamp        TIMESTAMP,
-  ui_version             BIGINT,
-  ui_tick                BIGINT,
+  event_timestamp            TIMESTAMP,
+  -- Synthetic character-session ID: short hex token that's stable across
+  -- maps/mounts/combat for one play session, but changes when the player
+  -- logs out, swaps character, restarts the game, or after a long idle gap.
+  character_session_id       STRING,
+  character_session_start_ts TIMESTAMP,
+  ui_version                 BIGINT,
+  ui_tick                    BIGINT,
 
   -- Game name (always "Guild Wars 2") + freeform description (usually empty)
   game_name              STRING,
