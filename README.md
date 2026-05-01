@@ -116,7 +116,8 @@ records are acknowledged before exit.
 |-------------------------------------|--------------------------------------------------------------|
 | `--poll-hz 5`                       | Poll rate (default 10 Hz; MumbleLink updates ~60 Hz)         |
 | `--no-dedupe`                       | Send every sample even when `uiTick` hasn't advanced         |
-| `--dry-run`                         | Parse + log records, skip the ZeroBus stream                 |
+| `--dry-run`                         | Parse + log the full record, skip the ZeroBus stream         |
+| `--pretty`                          | With `--dry-run`, format the JSON record indented + sorted   |
 | `--mumblelink-path /dev/shm/...`    | Override shared-memory path (Linux) or tagname (Windows)     |
 | `-v / --verbose`                    | DEBUG logging                                                |
 
@@ -134,6 +135,42 @@ Sample output:
 
 ---
 
+## Dry-run mode
+
+`--dry-run` reads MumbleLink, parses, and flattens exactly as the live mode
+does, but writes the record to the log instead of to ZeroBus. No SDK calls
+are made and no Databricks credentials are required, so this works even
+with an empty `.env`.
+
+Each polled tick produces two log lines: a one-line summary plus the full
+JSON record that *would* have been sent. Use `--pretty` to get an indented,
+key-sorted version of the JSON instead.
+
+```bash
+# Compact (one log line per record, easy to pipe into a file or jq):
+.venv/bin/python gw2_zerobus.py --dry-run
+
+# Pretty (indented JSON, easy to skim with your eyes):
+.venv/bin/python gw2_zerobus.py --dry-run --pretty
+```
+
+Sample compact output:
+
+```
+INFO  starting: table=<dry-run> endpoint=<dry-run> poll_hz=10.00 dedupe=True dry_run=True
+INFO  DRY-RUN: no records will be sent to ZeroBus
+INFO  [dry-run] tick=812334 player='Ridgeward' prof=Guardian map_id=38 map_type=Public mount=Raptor in_combat=False pos=(100.50, 200.50, -50.25)
+INFO  [dry-run] {"event_timestamp": "2026-05-01T...", "ui_version": 2, "ui_tick": 812334, ...65 fields total...}
+```
+
+Pipe to `jq` for ad-hoc filtering — e.g. extract the position trail:
+
+```bash
+.venv/bin/python gw2_zerobus.py --dry-run 2>&1 \
+  | sed -n 's/.*\[dry-run\] \({.*\)/\1/p' \
+  | jq -c '{ui_tick, x: .player_continent_x, y: .player_continent_y, map_id}'
+```
+
 ## Verifying the parser without GW2
 
 `_smoketest.py` builds a synthetic MumbleLink buffer and round-trips it
@@ -146,11 +183,12 @@ the emitted column names match the SQL DDL exactly.
 #   record keys: 65
 ```
 
-You can also run `--dry-run` against a synthetic file:
+You can also run `--dry-run` against a synthetic file (so you can see
+output without GW2 running at all):
 
 ```bash
 .venv/bin/python -c "from _smoketest import build_buffer; open('/tmp/ml.bin','wb').write(build_buffer())"
-.venv/bin/python gw2_zerobus.py --dry-run --mumblelink-path /tmp/ml.bin --poll-hz 5
+.venv/bin/python gw2_zerobus.py --dry-run --pretty --mumblelink-path /tmp/ml.bin --poll-hz 1
 ```
 
 ---

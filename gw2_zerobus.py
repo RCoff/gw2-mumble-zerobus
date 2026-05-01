@@ -13,6 +13,7 @@ acknowledged before exit.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -115,6 +116,24 @@ def _require_env(name: str) -> str:
     return value
 
 
+def _record_summary(record: dict) -> str:
+    """One-line at-a-glance summary of a flattened record."""
+    px = record.get("avatar_pos_x")
+    py = record.get("avatar_pos_y")
+    pz = record.get("avatar_pos_z")
+    pos = f"({px:.2f}, {py:.2f}, {pz:.2f})" if None not in (px, py, pz) else "(?, ?, ?)"
+    return (
+        f"tick={record.get('ui_tick')} "
+        f"player={record.get('player_name')!r} "
+        f"prof={record.get('profession_name')} "
+        f"map_id={record.get('map_id')} "
+        f"map_type={record.get('map_type_name')} "
+        f"mount={record.get('mount_name')} "
+        f"in_combat={record.get('ui_state_in_combat')} "
+        f"pos={pos}"
+    )
+
+
 class _ShutdownFlag:
     def __init__(self) -> None:
         self._stop = False
@@ -137,6 +156,7 @@ def run(
     client_secret: str,
     table: str,
     dry_run: bool = False,
+    pretty: bool = False,
 ) -> None:
     # Imported lazily so --dry-run works without the SDK installed.
     if not dry_run:
@@ -150,8 +170,12 @@ def run(
 
     LOG.info(
         "starting: table=%s endpoint=%s poll_hz=%.2f dedupe=%s dry_run=%s",
-        table, zerobus_endpoint, poll_hz, dedupe_by_tick, dry_run,
+        table or "<dry-run>",
+        zerobus_endpoint or "<dry-run>",
+        poll_hz, dedupe_by_tick, dry_run,
     )
+    if dry_run:
+        LOG.info("DRY-RUN: no records will be sent to ZeroBus")
 
     last_tick: Optional[int] = None
     sent = 0
@@ -195,12 +219,18 @@ def run(
                 record = flatten_sample(sample)
 
                 if dry_run:
-                    LOG.info("[dry-run] tick=%d player=%s pos=(%.2f, %.2f, %.2f)",
-                             sample.ui_tick,
-                             record.get("player_name"),
-                             record.get("avatar_pos_x") or 0,
-                             record.get("avatar_pos_y") or 0,
-                             record.get("avatar_pos_z") or 0)
+                    summary = _record_summary(record)
+                    payload = json.dumps(
+                        record,
+                        default=str,
+                        indent=2 if pretty else None,
+                        sort_keys=pretty,
+                    )
+                    if pretty:
+                        LOG.info("[dry-run] %s\n%s", summary, payload)
+                    else:
+                        LOG.info("[dry-run] %s", summary)
+                        LOG.info("[dry-run] %s", payload)
                 else:
                     stream.ingest_record_offset(record)
                 sent += 1
@@ -232,7 +262,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-dedupe", action="store_true",
                         help="Send every sample, even if uiTick has not advanced")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Read MumbleLink and log records; skip ZeroBus")
+                        help="Read MumbleLink and log the full record; skip ZeroBus")
+    parser.add_argument("--pretty", action="store_true",
+                        help="In --dry-run, log the JSON record indented & sorted")
     parser.add_argument("--mumblelink-path", default=None,
                         help="Override shared-memory path (Linux) or tagname (Windows)")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -270,8 +302,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             client_secret="",
             table="",
             dry_run=True,
+            pretty=args.pretty,
         )
         return 0
+
+    if args.pretty:
+        LOG.warning("--pretty has no effect without --dry-run; ignoring")
 
     run(
         poll_hz=poll_hz,
