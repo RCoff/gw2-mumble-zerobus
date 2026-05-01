@@ -354,8 +354,20 @@ class MapOverlay:
             if self._reader is not None:
                 sample = self._reader.read()
                 if sample.ui_tick != 0:
+                    same_tick = (
+                        self._last_sample is not None
+                        and self._last_sample.ui_tick == sample.ui_tick
+                    )
                     self._last_sample = sample
                     self._render(sample)
+                    LOG.debug(
+                        "tick=%d same_as_prev=%s map=%d pos=(%.1f, %.1f)",
+                        sample.ui_tick, same_tick, sample.context.map_id,
+                        sample.context.player_x or 0.0,
+                        sample.context.player_y or 0.0,
+                    )
+                else:
+                    LOG.debug("tick=0 (game not yet in map)")
         except MumbleLinkError as e:
             LOG.warning("read failed: %s", e)
         finally:
