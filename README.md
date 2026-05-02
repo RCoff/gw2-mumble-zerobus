@@ -121,6 +121,7 @@ records are acknowledged before exit.
 | `--dry-run`                         | Parse + log the full record, skip the ZeroBus stream         |
 | `--pretty`                          | With `--dry-run`, format the JSON record indented + sorted   |
 | `--mumblelink-path /dev/shm/...`    | Override shared-memory path (Linux) or tagname (Windows)     |
+| `-o / --output-file PATH`           | Append each record as a JSONL line to PATH; `-` = stdout     |
 | `-v / --verbose`                    | DEBUG logging                                                |
 
 Sample output:
@@ -232,6 +233,36 @@ include it, but Homebrew's macOS Python doesn't:
 | macOS (python.org installer)     | included                           |
 
 Pillow is in `requirements.txt`; that one's a normal pip install.
+
+## Writing records to a file (JSONL)
+
+`--output-file PATH` (or `-o PATH`) appends every flattened record as a
+single JSON line to a local file. It works in any mode:
+
+```bash
+# Capture-only — read MumbleLink, write JSONL, never touch ZeroBus.
+.venv/bin/python gw2_zerobus.py --dry-run -o session.jsonl
+
+# Live ingest *and* keep a local audit copy at the same time.
+.venv/bin/python gw2_zerobus.py -o session.jsonl
+
+# Pipe straight into jq for ad-hoc analysis. Use '-' for stdout —
+# logs continue to go to stderr, so the pipe stays clean.
+.venv/bin/python gw2_zerobus.py --dry-run -o - 2>/dev/null \
+  | jq -c '{ui_tick, sid: .character_session_id, x: .player_continent_x, y: .player_continent_y, map_id}'
+```
+
+Properties:
+
+- **Append mode + line-buffered**: re-running the streamer adds to the
+  existing file rather than truncating it, and each record is flushed to
+  disk on its own line — a crash drops at most the in-flight record.
+- **Written before ZeroBus send**: if an ingest call fails, the local file
+  still has a complete authoritative record you can replay later (e.g.
+  `cat session.jsonl | curl ... /zerobus/.../insert -d @-`).
+- **Re-loadable into Spark**: `spark.read.json("session.jsonl")` will
+  recover the full schema; the JSONL columns line up exactly with the UC
+  table.
 
 ## Verifying the parser without GW2
 

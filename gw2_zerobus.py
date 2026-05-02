@@ -159,6 +159,21 @@ class _ShutdownFlag:
         return self._stop
 
 
+def _open_output_file(path: Optional[str]):
+    """Open a JSONL output sink. Returns (file_obj, label) or (None, None).
+
+    `path == "-"` returns sys.stdout (so JSONL pipes cleanly into jq, etc.).
+    Any real path is opened in append mode + line-buffered so a crash never
+    drops the most recent record.
+    """
+    if not path:
+        return None, None
+    if path == "-":
+        return sys.stdout, "stdout"
+    fp = open(path, "a", buffering=1, encoding="utf-8")
+    return fp, path
+
+
 def run(
     *,
     poll_hz: float,
@@ -171,6 +186,7 @@ def run(
     table: str,
     dry_run: bool = False,
     pretty: bool = False,
+    output_file: Optional[str] = None,
 ) -> None:
     # Imported lazily so --dry-run works without the SDK installed.
     if not dry_run:
@@ -182,11 +198,14 @@ def run(
     signal.signal(signal.SIGINT, shutdown.trigger)
     signal.signal(signal.SIGTERM, shutdown.trigger)
 
+    output_fp, output_label = _open_output_file(output_file)
+
     LOG.info(
-        "starting: table=%s endpoint=%s poll_hz=%.2f dedupe=%s dry_run=%s",
+        "starting: table=%s endpoint=%s poll_hz=%.2f dedupe=%s dry_run=%s output=%s",
         table or "<dry-run>",
         zerobus_endpoint or "<dry-run>",
         poll_hz, dedupe_by_tick, dry_run,
+        output_label or "<none>",
     )
     if dry_run:
         LOG.info("DRY-RUN: no records will be sent to ZeroBus")
@@ -236,6 +255,12 @@ def run(
 
                 record = flatten_sample(sample, session=session)
 
+                # Write to file BEFORE sending — that way a failed ZeroBus
+                # call still leaves an authoritative local record we can
+                # replay later.
+                if output_fp is not None:
+                    output_fp.write(json.dumps(record, default=str) + "\n")
+
                 if dry_run:
                     summary = _record_summary(record)
                     payload = json.dumps(
@@ -268,6 +293,11 @@ def run(
                     stream.close()
                 except Exception as e:  # noqa: BLE001 - best-effort shutdown
                     LOG.warning("stream.close() raised: %s", e)
+            if output_fp is not None and output_fp is not sys.stdout:
+                try:
+                    output_fp.close()
+                except Exception as e:  # noqa: BLE001
+                    LOG.warning("output_file.close() raised: %s", e)
             LOG.info("done. sent=%d skipped_dupes=%d", sent, skipped_dupes)
 
 
@@ -285,6 +315,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="In --dry-run, log the JSON record indented & sorted")
     parser.add_argument("--mumblelink-path", default=None,
                         help="Override shared-memory path (Linux) or tagname (Windows)")
+    parser.add_argument("-o", "--output-file", default=None,
+                        help="Write each record as a JSONL line to PATH "
+                             "(append mode). Use '-' for stdout. Works with "
+                             "or without --dry-run; written before ZeroBus "
+                             "send so failed ingests still leave a record.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable DEBUG logging")
     return parser.parse_args(argv)
@@ -321,6 +356,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             table="",
             dry_run=True,
             pretty=args.pretty,
+            output_file=args.output_file,
         )
         return 0
 
@@ -336,6 +372,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         client_id=_require_env("DATABRICKS_CLIENT_ID"),
         client_secret=_require_env("DATABRICKS_CLIENT_SECRET"),
         table=_require_env("ZEROBUS_TABLE"),
+        output_file=args.output_file,
     )
     return 0
 
