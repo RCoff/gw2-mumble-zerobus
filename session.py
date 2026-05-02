@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-LOG = logging.getLogger("gw2_zerobus.session")
+LOGGER = logging.getLogger("gw2_zerobus.session")
 
 DEFAULT_IDLE_GAP_SECONDS = 60.0
 
@@ -77,8 +77,8 @@ class SessionTracker:
             # At character select / loading — close the current session,
             # pre-arm a new one for the next in-world sample.
             if not self._pending_login:
-                LOG.debug("session %s closed: uiTick=0 (logout/loading)",
-                          self._session_id)
+                LOGGER.debug("session %s closed: uiTick=0 (logout/loading)",
+                             self._session_id)
             self._pending_login = True
             self._last_seen_monotonic = now
             return None
@@ -101,7 +101,7 @@ class SessionTracker:
         if reason is not None:
             self._session_id = uuid.uuid4().hex[:12]
             self._session_start = datetime.now(timezone.utc)
-            LOG.info(
+            LOGGER.info(
                 "new character session: id=%s reason=%s name=%r pid=%d",
                 self._session_id, reason, name, pid,
             )

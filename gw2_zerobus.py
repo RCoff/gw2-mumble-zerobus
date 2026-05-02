@@ -28,7 +28,7 @@ import enrich
 from mumblelink import LinkedMem, MumbleLinkError, MumbleLinkReader
 from session import SessionInfo, SessionTracker
 
-LOG = logging.getLogger("gw2_zerobus")
+LOGGER = logging.getLogger("gw2_zerobus")
 
 
 def flatten_sample(
@@ -200,7 +200,7 @@ def run(
 
     output_fp, output_label = _open_output_file(output_file)
 
-    LOG.info(
+    LOGGER.info(
         "starting: table=%s endpoint=%s poll_hz=%.2f dedupe=%s dry_run=%s output=%s",
         table or "<dry-run>",
         zerobus_endpoint or "<dry-run>",
@@ -208,7 +208,7 @@ def run(
         output_label or "<none>",
     )
     if dry_run:
-        LOG.info("DRY-RUN: no records will be sent to ZeroBus")
+        LOGGER.info("DRY-RUN: no records will be sent to ZeroBus")
 
     last_tick: Optional[int] = None
     sent = 0
@@ -225,7 +225,7 @@ def run(
                 stream = sdk.create_stream(
                     client_id, client_secret, table_properties, options
                 )
-                LOG.info("ZeroBus stream open")
+                LOGGER.info("ZeroBus stream open")
 
             while not shutdown:
                 loop_start = time.monotonic()
@@ -233,7 +233,7 @@ def run(
                 try:
                     sample = reader.read()
                 except MumbleLinkError as e:
-                    LOG.warning("read failed: %s", e)
+                    LOGGER.warning("read failed: %s", e)
                     time.sleep(min(2.0, max(poll_interval, 0.5)))
                     continue
 
@@ -270,16 +270,16 @@ def run(
                         sort_keys=pretty,
                     )
                     if pretty:
-                        LOG.info("[dry-run] %s\n%s", summary, payload)
+                        LOGGER.info("[dry-run] %s\n%s", summary, payload)
                     else:
-                        LOG.info("[dry-run] %s", summary)
-                        LOG.info("[dry-run] %s", payload)
+                        LOGGER.info("[dry-run] %s", summary)
+                        LOGGER.info("[dry-run] %s", payload)
                 else:
                     stream.ingest_record_offset(record)
                 sent += 1
                 if sent % 100 == 0:
-                    LOG.info("sent=%d skipped_dupes=%d last_tick=%s",
-                             sent, skipped_dupes, last_tick)
+                    LOGGER.info("sent=%d skipped_dupes=%d last_tick=%s",
+                                sent, skipped_dupes, last_tick)
 
                 elapsed = time.monotonic() - loop_start
                 remaining = poll_interval - elapsed
@@ -288,17 +288,17 @@ def run(
 
         finally:
             if stream is not None:
-                LOG.info("flushing & closing ZeroBus stream (sent=%d)", sent)
+                LOGGER.info("flushing & closing ZeroBus stream (sent=%d)", sent)
                 try:
                     stream.close()
                 except Exception as e:  # noqa: BLE001 - best-effort shutdown
-                    LOG.warning("stream.close() raised: %s", e)
+                    LOGGER.warning("stream.close() raised: %s", e)
             if output_fp is not None and output_fp is not sys.stdout:
                 try:
                     output_fp.close()
                 except Exception as e:  # noqa: BLE001
-                    LOG.warning("output_file.close() raised: %s", e)
-            LOG.info("done. sent=%d skipped_dupes=%d", sent, skipped_dupes)
+                    LOGGER.warning("output_file.close() raised: %s", e)
+            LOGGER.info("done. sent=%d skipped_dupes=%d", sent, skipped_dupes)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -361,7 +361,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     if args.pretty:
-        LOG.warning("--pretty has no effect without --dry-run; ignoring")
+        LOGGER.warning("--pretty has no effect without --dry-run; ignoring")
 
     run(
         poll_hz=poll_hz,

@@ -37,7 +37,7 @@ from PIL import Image, ImageDraw, ImageTk
 import enrich
 from mumblelink import LinkedMem, MumbleLinkError, MumbleLinkReader
 
-LOG = logging.getLogger("gw2_map_overlay")
+LOGGER = logging.getLogger("gw2_map_overlay")
 
 TILE_SIZE = 256
 TILE_URL = "https://tiles.guildwars2.com/{continent}/{floor}/{zoom}/{x}/{y}.jpg"
@@ -70,9 +70,9 @@ def _http_get(url: str, timeout: float = 6.0) -> Optional[bytes]:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.read()
     except urllib.error.URLError as e:
-        LOG.warning("GET %s failed: %s", url, e)
+        LOGGER.warning("GET %s failed: %s", url, e)
     except Exception as e:  # noqa: BLE001
-        LOG.warning("GET %s raised: %s", url, e)
+        LOGGER.warning("GET %s raised: %s", url, e)
     return None
 
 
@@ -226,7 +226,7 @@ class TileLoader(threading.Thread):
             try:
                 img = self._cache.get(*key)
             except Exception as e:  # noqa: BLE001
-                LOG.warning("tile fetch %s failed: %s", key, e)
+                LOGGER.warning("tile fetch %s failed: %s", key, e)
                 img = None
             self._result_q.put((key, img))
 
@@ -321,7 +321,7 @@ class MapOverlay:
             # stays visible and the user can still close the window cleanly.
             self._reader = None
             self._status_var.set(f"MumbleLink error: {e}")
-            LOG.error("MumbleLink open failed: %s", e)
+            LOGGER.error("MumbleLink open failed: %s", e)
 
         self._loader.start()
         self._root.after(0, self._tick)
@@ -360,16 +360,16 @@ class MapOverlay:
                     )
                     self._last_sample = sample
                     self._render(sample)
-                    LOG.debug(
+                    LOGGER.debug(
                         "tick=%d same_as_prev=%s map=%d pos=(%.1f, %.1f)",
                         sample.ui_tick, same_tick, sample.context.map_id,
                         sample.context.player_x or 0.0,
                         sample.context.player_y or 0.0,
                     )
                 else:
-                    LOG.debug("tick=0 (game not yet in map)")
+                    LOGGER.debug("tick=0 (game not yet in map)")
         except MumbleLinkError as e:
-            LOG.warning("read failed: %s", e)
+            LOGGER.warning("read failed: %s", e)
         finally:
             self._root.after(self._poll_ms, self._tick)
 
@@ -401,7 +401,7 @@ class MapOverlay:
             map_id = self._last_sample.context.map_id
             if map_id in self._trails:
                 self._trails[map_id].clear()
-                LOG.info("cleared trail for map_id=%d", map_id)
+                LOGGER.info("cleared trail for map_id=%d", map_id)
                 self._render(self._last_sample)
 
     def _update_trail(self, map_id: int, x: float, y: float) -> "deque":
